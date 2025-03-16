@@ -7,6 +7,8 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+#include <string.h>
+#include <unistd.h>
 
 #define GRID_SIZE 5
 #define SHIP_COUNT 5
@@ -26,24 +28,82 @@ typedef struct {
     }\
   } while (0)
 
-static int my_table[GRID_SIZE][GRID_SIZE] = {0};
 
 void modify_table(int t[][GRID_SIZE], int table_size, Ship ships[], int ship_count){
 	for(int i=0; i<ship_count; i++)
 		t[ships[i].row][ships[i].col]=1;
 }
 
-void print_table(int t[][GRID_SIZE], int size){
-	for(int i=0;i<size;i++){
-		for(int j=0;j<size;j++)
+void print_table(int t[][GRID_SIZE]){
+	for(int i=0;i<GRID_SIZE;i++){
+		for(int j=0;j<GRID_SIZE;j++)
 			fprintf(stdout, "%d ",t[i][j]);
 		fprintf(stdout, "\n");
 	}
 }
 
+
+int send_attack(int fd1, int fd2, int x, int y) {
+    char buf[] = {x, y};
+    int size = write(fd1, buf, 2);
+    check_error(size == 2, "failed to write coordinates to FIFO");
+
+    char response[10] = {0};
+    int read_size = read(fd2, response, 10);
+    check_error(read_size > 0, "failed to read response from FIFO");
+	response[read_size] = '\0';
+
+    return (strcmp(response, "hit") == 0) ? 1 : -1;
+}
+
+int attack(int fd_attack, int fd_respond, int opponents_table[][GRID_SIZE], int *ships_sunk) {
+    printf("Insert attack coordinates (row col): ");
+    int x, y;
+    scanf("%d %d", &x, &y);
+
+    int result = send_attack(fd_attack, fd_respond, x, y);
+
+    if (result == -1) {
+        opponents_table[x][y] = -1;
+        printf("Miss!\n");
+    } else {
+        opponents_table[x][y] = 1;
+        printf("Hit!\n");
+        (*ships_sunk)++;
+    }
+
+    print_table(opponents_table);
+    return result;
+}
+
+int opponent_attacks(int fd_attack, int fd_respond, int my_table[][GRID_SIZE], int *my_ships_sunk) {
+    char buf[2] = {0};
+    int read_size = read(fd_respond, buf, 2);
+    check_error(read_size == 2, "failed to read opponent attack");
+
+    int x = buf[0], y = buf[1];
+	int result = 0;
+
+    char response[10];
+    if (my_table[x][y] == 1) {
+        (*my_ships_sunk)++;
+        strcpy(response, "hit");
+		result = 1;
+    } else {
+        strcpy(response, "miss");
+		result=-1;
+    }
+
+    int write_size = write(fd_attack, response, strlen(response) + 1);
+    check_error(write_size > 0, "failed to write response to FIFO");
+
+    return result;
+}
+
+
 int main(){
 
-	printf("Unesi pozicije brodova: \n");
+	/*printf("Unesi pozicije brodova: \n");
 
 	Ship ships[SHIP_COUNT];
 	for(int i=0; i<SHIP_COUNT; i++){
@@ -51,30 +111,72 @@ int main(){
 		//ne moze brod da bude na koordinati 6 7 lupam
 		scanf("%d %d", &ships[i].col, &ships[i].row);
 	}
+*/
+
+	Ship ships[SHIP_COUNT]={{2,2}, {2,3}, {3,3}, {2,4}, {4,2}};
+
+
+ int my_table[GRID_SIZE][GRID_SIZE] = {0};
+ int opponents_table[GRID_SIZE][GRID_SIZE] = {0};
+ // neka je pogodak 1, promašaj -1, i 0 da nisam pokušavala
+
 
  modify_table(my_table, GRID_SIZE, ships, SHIP_COUNT);
- print_table(my_table, GRID_SIZE);
+ print_table(my_table);
 
  int res = mkfifo("p2_writes",0600);
+ printf("succesfully made fifo file p2_writes\n");
  check_error(res!=-1, "mkfifo failed");
 // ubaci proveru neki check error za ovaj res, da li je fifo fajl uspesno kreiran
 
-int fd_attack = open("p2_writes", O_WRONLY);
-check_error(fd_attack!=-1, "open p2_writes failed");
+
+printf("Waiting for player 1 to start... \n");
 int fd_respond = open("p1_writes", O_RDONLY);
 check_error(fd_respond!=-1, "open p1_writes failed");
 
+int fd_attack = open("p2_writes", O_WRONLY);
+printf("Debag: fdattack se otvorio");
+check_error(fd_attack!=-1, "open p2_writes failed");
 
-// sada mi treba tabela u koju ću da zapisujem da li sam pogodila brod ili ne
- // neka je pogodak 1, promašaj -1, i 0 da nisam pokušavala
-
- int opponents_table[GRID_SIZE][GRID_SIZE] = {0};
 
  // napad izgleda ovako: do{
  //   salji koordinate u fajl
  //   primi odgovor i upisi -1 ili 1 na odgovarajucu koordinat
  //   ispisi trenutni opponents table
  //}while(pogodjen && pogodjenih<5)
+
+
+int ships_sunk = 0;
+int my_ships_sunk = 0;
+
+while(ships_sunk<SHIP_COUNT && my_ships_sunk<SHIP_COUNT) {
+
+	//p2 starts by receiving attacks
+	int opponent_result;
+	do {
+		opponent_result = opponent_attacks(fd_attack, fd_respond, my_table, &my_ships_sunk);
+
+	} while (opponent_result == 1 && my_ships_sunk < SHIP_COUNT);
+
+	if (my_ships_sunk >= SHIP_COUNT) {
+            printf("You lost, player1 won!\n");
+            break;
+        }
+
+        // Now, Player 2 attacks until they miss
+        int result;
+        do {
+            result = attack(fd_attack, fd_respond, opponents_table, &ships_sunk);
+        } while (result == 1 && ships_sunk < SHIP_COUNT);
+
+        if (ships_sunk >= SHIP_COUNT) {
+            printf("You win!\n");
+            break;
+        }
+}
+ close(fd_attack);
+    close(fd_respond);
+    unlink("p2_writes");
 
  // smenjuju se napadi sve dok jedan ne pobedi
 
